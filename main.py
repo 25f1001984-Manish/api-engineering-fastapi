@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Header, Response, Request, HTTPException
+from fastapi import FastAPI, Header, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from uuid import uuid4
@@ -14,7 +14,6 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -47,14 +46,21 @@ def root():
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
 
+    # Allow CORS preflight requests
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     client_id = request.headers.get("x-client-id")
 
     if client_id:
         now = time.time()
 
-        bucket = client_requests.setdefault(client_id, [])
+        if client_id not in client_requests:
+            client_requests[client_id] = []
 
-        # Remove expired timestamps
+        bucket = client_requests[client_id]
+
+        # Remove timestamps older than WINDOW seconds
         bucket[:] = [t for t in bucket if now - t < WINDOW]
 
         if len(bucket) >= RATE_LIMIT:
@@ -65,9 +71,7 @@ async def rate_limit(request: Request, call_next):
 
             return JSONResponse(
                 status_code=429,
-                content={
-                    "detail": "Rate limit exceeded"
-                },
+                content={"detail": "Rate limit exceeded"},
                 headers={
                     "Retry-After": str(retry_after)
                 }
@@ -77,6 +81,7 @@ async def rate_limit(request: Request, call_next):
 
     response = await call_next(request)
     return response
+
 
 # ----------------------------
 # IDEMPOTENT POST
@@ -97,14 +102,12 @@ def create_order(
 
     return order
 
+
 # ----------------------------
 # CURSOR PAGINATION
 # ----------------------------
 @app.get("/orders")
-def get_orders(
-    limit: int = 10,
-    cursor: str | None = None
-):
+def get_orders(limit: int = 10, cursor: str = None):
 
     if limit < 1:
         limit = 1
@@ -114,7 +117,7 @@ def get_orders(
     if cursor:
         try:
             start = int(
-                base64.b64decode(cursor).decode()
+                base64.b64decode(cursor.encode()).decode()
             )
         except Exception:
             raise HTTPException(
